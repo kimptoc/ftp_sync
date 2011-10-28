@@ -2,16 +2,20 @@ require 'net/ftp'
 require 'rubygems'
 require 'net/ftp/list'
 require 'fileutils'
+require 'forwardable'
 
 # A Ruby library for recursively downloading and uploading directories to/from ftp
 # servers. Also supports uploading and downloading a list of files relative to 
 # the local/remote roots. You can specify a timestamp to only download files 
 # newer than that timestamp, or only download files newer than their local copy.
 class FtpSync
-  
+     extend Forwardable
+
   attr_accessor :verbose, :server, :user, :password
-  
-  # Creates a new instance for accessing a ftp server 
+
+  def_delegators :@connection, :pwd ,:chdir, :mkdir, :list, :get, :put, :delete
+
+  # Creates a new instance for accessing a ftp server
   # requires +server+, +user+, and +password+ options
   # * :ignore - Accepts an instance of class which has an ignore? method, taking a path and returns true or false, for whether to ignore the file or not.
   # * :verbose - Whether should be verbose
@@ -23,6 +27,7 @@ class FtpSync
     @ignore = options[:ignore]
     @recursion_level = 0
     @verbose = options[:verbose] || false
+    connect!
   end
   
   # Recursively pull down files
@@ -40,11 +45,15 @@ class FtpSync
     tocopy = []
     recurse = []
 
+    log "pull_dir local:#{localpath}, remote:#{remotepath}"
     # To trigger error if path doesnt exist since list will
     # just return and empty array
+    pwd = @connection.pwd
     @connection.chdir(remotepath) 
+    @connection.chdir(pwd)
 
     @connection.list(remotepath) do |e|
+      log "pull_dir processing item:#{e}"
       entry = Net::FTP::List.parse(e)
       
       paths = [ File.join(localpath, entry.basename), "#{remotepath}/#{entry.basename}".gsub(/\/+/, '/') ]
@@ -62,20 +71,26 @@ class FtpSync
       end
       todelete.delete paths[0]
     end
-    
+
     tocopy.each do |paths|
+      log "Now to do the actual copying:#{paths}"
       localfile, remotefile = paths
       unless should_ignore?(localfile)
         begin
           @connection.get(remotefile, localfile)
           log "Pulled file #{remotefile}"
-        rescue Net::FTPPermError
+        rescue Net::FTPPermError => e
           log "ERROR READING #{remotefile}"
+          log e.message
+          log e.backtrace.join("\n")
           raise Net::FTPPermError unless options[:skip_errors]
-        end        
+        end
+      else
+        log "Ignoring file: #{localfile}"
       end
     end
-    
+
+    log "Now doing recursively"
     recurse.each do |paths|
       localdir, remotedir = paths
       Dir.mkdir(localdir) unless File.exist?(localdir)
@@ -99,7 +114,9 @@ class FtpSync
   # Recursively push a local directory of files onto an FTP server
   def push_dir(localpath, remotepath)
     connect!
-    
+
+    @connection.mkdir(remotepath) unless exists?(remotepath)
+
     Dir.glob(File.join(localpath, '**', '*')) do |f|
       f.gsub!("#{localpath}/", '')
       local = File.join localpath, f
@@ -116,7 +133,21 @@ class FtpSync
     
     close!
   end
-  
+
+  def exists?(remotepath)
+    remotepath_exists = false
+    pwd = @connection.pwd
+    begin
+      @connection.chdir(remotepath)
+      remotepath_exists = true
+    rescue Net::FTPPermError => e
+      remotepath_exists = false
+    ensure
+      @connection.chdir(pwd)
+    end
+    return remotepath_exists
+  end
+
   # Pull a supplied list of files from the remote ftp path into the local path
   def pull_files(localpath, remotepath, filelist)
     connect!
@@ -189,6 +220,6 @@ class FtpSync
     end
     
     def log(msg)
-      puts msg if @verbose
+      puts "#{Time.now}:FTPS:#{msg}" if @verbose
     end
 end
